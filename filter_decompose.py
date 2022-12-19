@@ -1,10 +1,6 @@
-import scipy.signal
-import scipy.special
 import numpy as np
 import cmath
 import math
-
-import matplotlib.pyplot as plt
 
 DBL_EPSILON = 2.2204460492503131e-16
 DBL_MAX = 1.7976931348623157e308
@@ -20,8 +16,52 @@ CONVERGENCE = 100
 EPSILON_TO_USE = 5 * DBL_EPSILON
 
 
+def filter_conversion(filt):
+    if len(filt) == 3:
+        converted = second_order_conversion(filt)
+    elif len(filt) == 5:
+        converted = fourth_order_conversion(filt)
+    else:
+        print("unsupported filter order")
+        raise RuntimeError("unsupported filter")
+    return converted
+
+
+def second_order_conversion(filt):
+    a = filt[0]
+    b = filt[1]
+    if a != filt[2]:
+        raise RuntimeError("expecting symmetrical filter")
+
+    return [a**2, 2 * a * b, 2 * a**2 + b**2, 2 * a * b, a**2]
+
+
+def fourth_order_conversion(filt):
+    c = filt[0]
+    d = filt[1]
+    e = filt[2]
+
+    if d != filt[3] or c != filt[4]:
+        raise RuntimeError("expecting symmetrical filter")
+
+    return [
+        c**2,
+        2 * c * d,
+        d**2 + 2 * c * e,
+        2 * c * d + 2 * d * e,
+        2 * c**2 + 2 * d**2 + e**2,
+        2 * c * d + 2 * d * e,
+        d**2 + 2 * c * e,
+        2 * c * d,
+        c**2,
+    ]
+
+
 class Poly:
     def __init__(self, fil):
+
+        fil[np.abs(fil) < 1e-8] = 0.0
+
         self.num_coefficients = len(fil)
         self.current_degree = self.num_coefficients - 1
         self.original_degree = self.current_degree
@@ -61,20 +101,20 @@ class Poly:
             True  # not sure why this is necessary, but flag for real coefficients?
         )
 
+        self.diff = 0
         self.gain = None
 
     def get_roots(self):
         # self.current_degree -= 1 # reduce for indexing from zero
         self.degree_reduced = self.current_degree
 
-        diff = 0  # number of roots at zero
-
         self.poly_check()
 
-        diff = self.current_degree - self.degree_reduced
+        self.diff = self.current_degree - self.degree_reduced  # number of roots at zero
 
         # pointer should change?
         self.current_degree = self.degree_reduced
+        self.coeffs = self.coeffs[self.diff :]
 
         # check for linear or quadratic, which can be solved directly l438
 
@@ -100,7 +140,7 @@ class Poly:
 
             reduction = self.polynomial_deflate(self.flag)
             # self.pred = self.pred + reduction
-            for i in range(0, len(self.polynomial_reduced)):
+            for i in range(0, self.degree_reduced + 1):
                 self.psave[i] = self.polynomial_reduced[i]
 
             self.polynomial_reduced = self.polynomial_reduced[reduction:]
@@ -115,9 +155,11 @@ class Poly:
             if abs(self.roots[0]) <= 1:
                 self.roots[0], new_error = self.newton(self.roots[0])
 
+        self.current_degree = (
+            self.current_degree + self.diff
+        )  # remember that we have some roots at 0
         if max_error > 9e-5:
             print("ROOT FINDING FAILED")
-
 
     def poly_check(self):
         i = -1
@@ -143,7 +185,7 @@ class Poly:
         # check for number of zeros in input polynomial
         zero_count = 0
         # not_found = True
-        for i in range(0, self.current_degree):
+        for i in range(0, self.current_degree + 1):
             if abs(self.coeffs[i]) == 0.0:
                 zero_count += 1
             else:
@@ -154,7 +196,7 @@ class Poly:
             self.degree_reduced = self.current_degree
             return 0
         else:
-            for j in range(0, zero_count + 1):
+            for j in range(0, zero_count):
                 self.roots[self.current_degree - j - 1] = complex(0.0, 0.0)
         self.degree_reduced = self.current_degree - zero_count
 
@@ -192,9 +234,7 @@ class Poly:
 
         while second_iter <= 2:
             while (
-                self.iter < MULLER_ITTERMAX
-                and not rootd
-                and noise <= MULLER_NOISEMAX
+                self.iter < MULLER_ITTERMAX and not rootd and noise <= MULLER_NOISEMAX
             ):
                 self.muller_root_of_parabola()
 
@@ -247,7 +287,7 @@ class Poly:
         c_2 = (1.0 + self.q2) * self.f2
 
         # discr = B2^2 - 4A2C2
-        discriminant = b_2 ** 2 - 4.0 * a_2 * c_2
+        discriminant = b_2**2 - 4.0 * a_2 * c_2
 
         # denominators of q2
         n_1 = b_2 - cmath.sqrt(discriminant)
@@ -321,7 +361,7 @@ class Poly:
         if abs(self.f2.real) + abs(self.f2.imag) > MULLER_BOUND4:
             f2absq = abs(self.f2.real) + abs(self.f2.imag)
         else:
-            f2absq = self.f2.real ** 2 + self.f2.imag ** 2
+            f2absq = self.f2.real**2 + self.f2.imag**2
         return f2absq
 
     # Muller's modification to improve convergence l872
@@ -408,7 +448,7 @@ class Poly:
 
         if not flag:  # if x0 is complex, then there are two roots
             a = 2 * x0.real
-            b = -(x0.real ** 2 + x0.imag ** 2)
+            b = -(x0.real**2 + x0.imag**2)
             self.roots[self.degree_reduced - 2] = x0.conjugate()
             self.horncd(a, b)
             return 2
@@ -428,7 +468,10 @@ class Poly:
         for i in index:
             self.polynomial_reduced[i] = complex(
                 self.polynomial_reduced[i].real
-                + (a * self.polynomial_reduced[i + 1].real + b * self.polynomial_reduced[i + 2].real),
+                + (
+                    a * self.polynomial_reduced[i + 1].real
+                    + b * self.polynomial_reduced[i + 2].real
+                ),
                 self.polynomial_reduced[i].imag,
             )
 
@@ -440,7 +483,8 @@ class Poly:
         if flag:  # real coefficients
             for i in index:
                 self.polynomial_reduced[i] = complex(
-                    self.polynomial_reduced[i].real + (x0.real * self.polynomial_reduced[i + 1].real),
+                    self.polynomial_reduced[i].real
+                    + (x0.real * self.polynomial_reduced[i + 1].real),
                     self.polynomial_reduced[i].imag,
                 )
         else:  # complex coefficients
@@ -473,15 +517,15 @@ class Poly:
                 xmin = x0
                 fabsmin = abs(f)
                 noise = 0
-            if abs(df) != 0.:
+            if abs(df) != 0.0:
                 dxh = f / df
                 if abs(dxh) < new_error * FACTOR:
                     dx = dxh
                     new_error = abs(dx)
             if abs(xmin) != 0.0:
                 if new_error / abs(xmin) < DBL_EPSILON or noise == NOISEMAX:
-                    if noise == NOISEMAX:
-                        print("cutting out on noisemax")
+                    # if noise == NOISEMAX:
+                    #     print("cutting out on noisemax")
                     if abs(xmin.imag) < BOUND and self.flag:
                         xmin = complex(
                             xmin.real, 0.0
@@ -502,7 +546,10 @@ class Poly:
 
     # calculate roots of quadratic
     def quadratic(self):
-        discriminant = self.polynomial_reduced[1] * self.polynomial_reduced[1] - 4.0 * self.polynomial_reduced[2] * self.polynomial_reduced[0]
+        discriminant = (
+            self.polynomial_reduced[1] * self.polynomial_reduced[1]
+            - 4.0 * self.polynomial_reduced[2] * self.polynomial_reduced[0]
+        )
         z1 = -self.polynomial_reduced[1] + cmath.sqrt(discriminant)
         z2 = -self.polynomial_reduced[1] - cmath.sqrt(discriminant)
         n = 2.0 * self.polynomial_reduced[2]
@@ -535,19 +582,19 @@ class Poly:
         on_axis = []
         on_one = []
 
-        h_0 = [1.] * self.original_degree
-        h_1 = [1.] * self.original_degree
-        h_2 = [1.] * self.original_degree
-        h_3 = [0.] * self.original_degree
-        h_4 = [0.] * self.original_degree
+        h_0 = [1.0] * self.original_degree
+        h_1 = [1.0] * self.original_degree
+        h_2 = [1.0] * self.original_degree
+        h_3 = [0.0] * self.original_degree
+        h_4 = [0.0] * self.original_degree
 
-        temp_0 = [0.] * self.original_degree
-        temp_1 = [0.] * self.original_degree
-        temp_2 = [0.] * self.original_degree
-        temp_3 = [0.] * self.original_degree
-        temp_4 = [0.] * self.original_degree
+        temp_0 = [0.0] * self.original_degree
+        temp_1 = [0.0] * self.original_degree
+        temp_2 = [0.0] * self.original_degree
+        temp_3 = [0.0] * self.original_degree
+        temp_4 = [0.0] * self.original_degree
 
-        h_m = complex(1., 1.)
+        h_m = complex(1.0, 1.0)
 
         count = 0  # filter count, I think
         k = 0  # I really have no idea
@@ -564,10 +611,14 @@ class Poly:
             if 1 - 1e-8 < abs(root) < 1 + 1e-8 and abs(root.imag) > 0:
                 on_unit_circle.append(root)
 
-            if abs(root.imag) == 0. and (abs(root.real) > 1 + 1e-8 or abs(root.real) < 1 - 1e-8):
+            if abs(root.imag) == 0.0 and (
+                abs(root.real) > 1 + 1e-8 or abs(root.real) < 1 - 1e-8
+            ):
                 on_axis.append(root)
 
-            if abs(root.imag) == 0. and (abs(root.real) < 1 + 1e-8 and abs(root.real) > 1 - 1e-8):
+            if abs(root.imag) == 0.0 and (
+                abs(root.real) < 1 + 1e-8 and abs(root.real) > 1 - 1e-8
+            ):
                 on_one.append(root)
 
         num_inside_unit_circle = len(inside_unit_circle)
@@ -578,75 +629,87 @@ class Poly:
 
         for i in range(0, num_on_one):
             if on_one[i].real - 1 > -1e-8 and on_one[i].real - 1 < 1e-8:
-                h_1[i] = -1.
+                h_1[i] = -1.0
             temp_0[count] = h_0[i]
             temp_1[count] = h_1[i]
-            temp_2[count] = 0.
-            temp_3[count] = 0.
-            temp_4[count] = 0.
+            temp_2[count] = 0.0
+            temp_3[count] = 0.0
+            temp_4[count] = 0.0
             count += 1
-            types.append('on_one')
+            types.append("on_one")
 
         for i in range(0, num_on_axis):
 
             if abs(on_axis[i].real) > 1:
                 k += 1
             elif abs(on_axis[i].real) < 1:
-                if abs(on_axis[i].real) > 0. or abs(on_axis[i].imag) > 0.:
+                if abs(on_axis[i].real) > 0.0 or abs(on_axis[i].imag) > 0.0:
                     h_1[i + num_on_one - k] = -(on_axis[i].real + 1 / on_axis[i].real)
-                    temp_0[count] = h_0[i + num_on_one -k]
-                    temp_1[count] = h_1[i + num_on_one -k]
+                    temp_0[count] = h_0[i + num_on_one - k]
+                    temp_1[count] = h_1[i + num_on_one - k]
                     temp_2[count] = h_2[i + num_on_one]
-                    temp_3[count] = 0.
-                    temp_4[count] = 0.
+                    temp_3[count] = 0.0
+                    temp_4[count] = 0.0
                     count += 1
-                    types.append('on_axis')
+                    types.append("on_axis")
 
         for i in range(0, num_on_unit_circle):
 
             if on_unit_circle[i].imag < 0:
                 k += 1
             elif on_unit_circle[i].imag > 0:
-                h_1[i + num_on_one + num_on_axis - k] = -2 * on_unit_circle[i].real / abs(on_unit_circle[i])
+                h_1[i + num_on_one + num_on_axis - k] = (
+                    -2 * on_unit_circle[i].real / abs(on_unit_circle[i])
+                )
                 temp_0[count] = h_0[i + num_on_one + num_on_axis - k]
                 temp_1[count] = h_1[i + num_on_one + num_on_axis - k]
                 temp_2[count] = h_2[i + num_on_one + num_on_axis]
-                temp_3[count] = 0.
-                temp_4[count] = 0.
+                temp_3[count] = 0.0
+                temp_4[count] = 0.0
                 count += 1
-                types.append('on_unit_circle')
+                types.append("on_unit_circle")
 
         for i in range(0, num_inside_unit_circle):
             r = abs(inside_unit_circle[i])
 
-            h_2[i + num_on_one + num_on_axis + num_on_unit_circle - k] = (math.pow(r, 2.) + 1 / math.pow(r, 2.)) + math.pow(2 * inside_unit_circle[i].real / abs(inside_unit_circle[i]), 2.)
+            h_2[i + num_on_one + num_on_axis + num_on_unit_circle - k] = (
+                math.pow(r, 2.0) + 1 / math.pow(r, 2.0)
+            ) + math.pow(
+                2 * inside_unit_circle[i].real / abs(inside_unit_circle[i]), 2.0
+            )
 
-            h_1[i + num_on_one + num_on_axis + num_on_unit_circle - k] = -2. * (r + 1 / r) * inside_unit_circle[i].real / abs(inside_unit_circle[i])
+            h_1[i + num_on_one + num_on_axis + num_on_unit_circle - k] = (
+                -2.0
+                * (r + 1 / r)
+                * inside_unit_circle[i].real
+                / abs(inside_unit_circle[i])
+            )
 
             temp_0[count] = h_0[i + num_on_one + num_on_axis + num_on_unit_circle - k]
             temp_1[count] = h_1[i + num_on_one + num_on_axis + num_on_unit_circle - k]
             temp_2[count] = h_2[i + num_on_one + num_on_axis + num_on_unit_circle - k]
             temp_3[count] = h_1[i + num_on_one + num_on_axis + num_on_unit_circle - k]
-            temp_4[count] = 1.
+            temp_4[count] = 1.0
             count += 1
-            types.append('inside_unit_circle')
+            types.append("inside_unit_circle")
 
         decomposed_filters = []
         for i in range(0, count):
             loc_filt = [temp_0[i], temp_1[i], temp_2[i], temp_3[i], temp_4[i]]
             decomposed_filters.append(loc_filt)
 
-        for i in range(0, count):
-            print(f"{i}\t{decomposed_filters[i]}\t{types[i]}")
+        # for i in range(0, count):
+        #     print(f"{i}\t{decomposed_filters[i]}\t{types[i]}")
 
+        self.decomposed_filters = decomposed_filters
 
     def calculate_gain(self):
         NPLOT = 2048
 
-        upper = 0.
-        lower = 0.
+        upper = 0.0
+        lower = 0.0
 
-        H = complex(1., 0.)
+        H = complex(1.0, 0.0)
 
         for k in range(0, NPLOT):
             omega = math.pi * float(k) / float(NPLOT)
@@ -654,24 +717,29 @@ class Poly:
             w_re = math.cos(omega)
             w_im = -1 * math.sin(omega)
 
-            t_re = math.cos(2.*omega)
-            t_im = -1 * math.sin(2.*omega)
+            t_re = math.cos(2.0 * omega)
+            t_im = -1 * math.sin(2.0 * omega)
 
-            s_t_re = 1.
-            s_t_im = 0.
+            s_t_re = 1.0
+            s_t_im = 0.0
             s_h_re = self.original_coeffs[0]
-            s_h_im = 0.
+            s_h_im = 0.0
 
-            #for m in range(0, self.num_coefficients-1):
+            # for m in range(0, self.num_coefficients-1):
             m = 0
-            while m < self.num_coefficients-1:
+            while m < self.num_coefficients - 1:
 
-                if self.roots[m].imag == 0.:
-                    temp = complex(1 - self.roots[m].real * w_re, self.roots[m].real * w_im)
+                if self.roots[m].imag == 0.0:
+                    temp = complex(
+                        1 - self.roots[m].real * w_re, self.roots[m].real * w_im
+                    )
                 else:
-                    temp_temp = math.pow(abs(self.roots[m]), 2.)
+                    temp_temp = math.pow(abs(self.roots[m]), 2.0)
 
-                    temp = complex(1. - (2 * self.roots[m].real * w_re) + (temp_temp * t_re), temp_temp * t_im - 2 * self.roots[m].real * w_im)
+                    temp = complex(
+                        1.0 - (2 * self.roots[m].real * w_re) + (temp_temp * t_re),
+                        temp_temp * t_im - 2 * self.roots[m].real * w_im,
+                    )
                     m += 1
 
                 H = H * temp
@@ -685,17 +753,14 @@ class Poly:
                 s_h_re += self.original_coeffs[i] * s_t_re
                 s_h_im += self.original_coeffs[i] * s_t_im
 
-            s_h_mag = math.sqrt(math.pow(s_h_re, 2.) + math.pow(s_h_im, 2.))
+            s_h_mag = math.sqrt(math.pow(s_h_re, 2.0) + math.pow(s_h_im, 2.0))
             h_mag = abs(H)
-            H = complex(1., 0.)
+            H = complex(1.0, 0.0)
             upper += s_h_mag * h_mag
-            lower += math.pow(h_mag, 2.)
+            lower += math.pow(h_mag, 2.0)
 
         self.gain = upper / lower
-        print(f"gain = {self.gain}")
-
-
-
+        # print(f"gain = {self.gain}")
 
 
 if __name__ == "__main__":
